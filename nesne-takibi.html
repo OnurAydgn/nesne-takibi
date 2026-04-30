@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Nesne Takibi</title>
+
+  <!-- TensorFlow.js ve COCO-SSD modelini CDN'den yükle -->
+  <!-- Bu sayede hiçbir şey kurmadan, doğrudan tarayıcıda AI çalışır -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+  <style>
+    /* ── Genel Sayfa Stili ─────────────────────────────────── */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0a;
+      color: #00ff41;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* ── Başlık ────────────────────────────────────────────── */
+    #header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0,0,0,0.8);
+      border-bottom: 1px solid #00ff4130;
+      z-index: 100;
+    }
+
+    #title {
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      color: #00ff41;
+    }
+
+    /* FPS ve durum göstergesi */
+    #stats {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #00ff4199;
+    }
+
+    #fps-display { color: #00ff41; }
+    #fps-display.low { color: #ff8c00; } /* Düşük FPS'te turuncu */
+
+    /* ── Kamera + Canvas Kapsayıcı ─────────────────────────── */
+    #container {
+      position: relative;
+      /* Kamera görüntüsü bu kutunun içinde ortalanır */
+    }
+
+    /* Kameradan gelen ham video — kullanıcı bunu görür */
+    #video {
+      display: block;
+      border: 1px solid #00ff4130;
+      border-radius: 4px;
+    }
+
+    /* Canvas, videonun tam üstüne yerleşir — bounding box'ları buraya çizeriz */
+    /* pointer-events: none = tıklamalar videonun altına geçer */
+    #canvas {
+      position: absolute;
+      top: 0; left: 0;
+      border-radius: 4px;
+    }
+
+    /* ── Yükleme Ekranı ────────────────────────────────────── */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      z-index: 200;
+    }
+
+    #loading-title {
+      font-size: 18px;
+      font-weight: bold;
+      letter-spacing: 3px;
+    }
+
+    #loading-status {
+      font-size: 13px;
+      color: #00ff4199;
+      min-height: 20px;
+    }
+
+    /* Animasyonlu yükleme çubuğu */
+    #progress-bar {
+      width: 280px;
+      height: 2px;
+      background: #1a1a1a;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #progress-fill {
+      height: 100%;
+      background: #00ff41;
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s ease;
+      /* Sonsuz parlama animasyonu */
+      animation: glow-pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes glow-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* ── Alt Bilgi Çubuğu ──────────────────────────────────── */
+    #footer {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 10px 20px;
+      background: rgba(0,0,0,0.8);
+      border-top: 1px solid #00ff4130;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #00ff4166;
+    }
+
+    #detected-list {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .detected-tag {
+      background: #00ff4115;
+      border: 1px solid #00ff4140;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 11px;
+      color: #00ff41;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.9); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    /* Kilitlenme efekti — kutu kırmızı yanıp söner */
+    @keyframes lock-flash {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    #lock-indicator {
+      display: none;
+      color: #ff4444;
+      font-weight: bold;
+      letter-spacing: 2px;
+      animation: lock-flash 0.8s ease-in-out infinite;
+    }
+
+    #lock-indicator.active { display: block; }
+
+    /* İpucu metni */
+    #hint {
+      position: fixed;
+      bottom: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7);
+      border: 1px solid #00ff4140;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #00ff4199;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: opacity 0.5s;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Üst Başlık ──────────────────────────────────────── -->
+<div id="header">
+  <div id="title">◉ NESNE TAKİP SİSTEMİ</div>
+  <div id="stats">
+    <span id="model-status">⏳ Model yükleniyor...</span>
+    <span id="fps-display">-- FPS</span>
+    <span id="detection-count">0 nesne</span>
+  </div>
+</div>
+
+<!-- ── Yükleme Ekranı ───────────────────────────────────── -->
+<div id="loading">
+  <div id="loading-title">◉ NESNE TAKİP SİSTEMİ</div>
+  <div id="progress-bar"><div id="progress-fill"></div></div>
+  <div id="loading-status">TensorFlow.js başlatılıyor...</div>
+</div>
+
+<!-- ── Ana Kamera Alanı ─────────────────────────────────── -->
+<div id="container">
+  <!-- Kamera görüntüsü buraya gelir -->
+  <video id="video" autoplay muted playsinline></video>
+  <!-- Bounding box'lar bu canvas'a çizilir -->
+  <canvas id="canvas"></canvas>
+</div>
+
+<!-- ── Kilit Göstergesi ─────────────────────────────────── -->
+<div id="lock-indicator">🔴 KİLİTLENDİ</div>
+
+<!-- ── İpucu ────────────────────────────────────────────── -->
+<div id="hint">📍 Takip etmek için bir nesneye tıklayın</div>
+
+<!-- ── Alt Bilgi ────────────────────────────────────────── -->
+<div id="footer">
+  <div id="detected-list"></div>
+  <div>COCO-SSD MobileNetV2 · TensorFlow.js</div>
+</div>
+
+
+<script>
+// ============================================================
+// AYARLAR
+// ============================================================
+
+// Kaç ms'de bir tespit yapılsın? (düşük = hızlı ama ağır)
+const DETECTION_INTERVAL_MS = 80; // ~12 FPS tespit
+
+// Modelin minimum güven eşiği (0-1 arası)
+const CONFIDENCE_THRESHOLD = 0.45;
+
+// Bounding box geçiş akıcılığı (0=çok yavaş, 1=anında)
+const SMOOTHING = 0.25;
+
+// Nesne kaç frame görünmezse takibi bırakalım
+const MAX_LOST_FRAMES = 15;
+
+// ============================================================
+// DOM ELEMANLARI
+// ============================================================
+const video       = document.getElementById('video');
+const canvas      = document.getElementById('canvas');
+const ctx         = canvas.getContext('2d');
+const loading     = document.getElementById('loading');
+const loadStatus  = document.getElementById('loading-status');
+const progressFill= document.getElementById('progress-fill');
+const modelStatus = document.getElementById('model-status');
+const fpsDisplay  = document.getElementById('fps-display');
+const detCount    = document.getElementById('detection-count');
+const detList     = document.getElementById('detected-list');
+const lockInd     = document.getElementById('lock-indicator');
+const hint        = document.getElementById('hint');
+
+// ============================================================
+// DURUM DEĞİŞKENLERİ
+// ============================================================
+let model = null;          // Yüklenen COCO-SSD modeli
+let detections = [];       // Son frame'deki tespitler
+let trackedBox = null;     // Takip edilen nesnenin smooth kutusu [x,y,w,h]
+let trackedClass = null;   // Takip edilen nesne sınıfı ('person' vb.)
+let lockedClass = null;    // Kullanıcının kilitlediği sınıf
+let lostFrames = 0;        // Kaç frame'dir nesne görünmüyor
+
+// FPS hesaplama için
+let frameCount = 0;
+let lastFpsTime = Date.now();
+
+// ============================================================
+// YARDIMCI FONKSİYONLAR
+// ============================================================
+
+// İki bounding box arasında IoU (Intersection over Union) hesaplar.
+// 1.0 = tam örtüşme, 0.0 = hiç örtüşme yok.
+// Bu değer ile "bu frame'deki nesne, bir öncekiyle aynı mı?" diye kontrol ederiz.
+function calcIoU(a, b) {
+  const ix = Math.max(a[0], b[0]);
+  const iy = Math.max(a[1], b[1]);
+  const iw = Math.min(a[0]+a[2], b[0]+b[2]) - ix;
+  const ih = Math.min(a[1]+a[3], b[1]+b[3]) - iy;
+  if (iw <= 0 || ih <= 0) return 0;
+  const inter = iw * ih;
+  const union = a[2]*a[3] + b[2]*b[3] - inter;
+  return inter / union;
+}
+
+// Exponential smoothing: eski ve yeni kutuyu alpha oranında karıştırır.
+// Bu sayede bounding box sıçramaz, akıcı kayar.
+function smoothBox(old, nw, alpha = SMOOTHING) {
+  return old.map((v, i) => alpha * nw[i] + (1 - alpha) * v);
+}
+
+// ============================================================
+// KAMERA BAŞLATMA
+// ============================================================
+async function startCamera() {
+  loadStatus.textContent = 'Kamera izni isteniyor...';
+  progressFill.style.width = '20%';
+
+  try {
+    // Tarayıcıdan kamera erişimi iste
+    // facingMode: 'environment' = arka kamera (telefonda), 'user' = ön kamera
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'environment', // Arka kamera
+        width:  { ideal: 1280 },
+        height: { ideal: 720  },
+      }
+    });
+
+    video.srcObject = stream;
+
+    // Video boyutları hazır olunca canvas'ı da ayarla
+    return new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        // Canvas boyutunu video boyutuna eşitle
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        // Container ve video boyutlarını ekrana göre ayarla
+        const maxW = window.innerWidth  - 40;
+        const maxH = window.innerHeight - 120;
+        const scale = Math.min(maxW / video.videoWidth, maxH / video.videoHeight);
+        const displayW = video.videoWidth  * scale;
+        const displayH = video.videoHeight * scale;
+
+        video.style.width  = displayW + 'px';
+        video.style.height = displayH + 'px';
+        canvas.style.width  = displayW + 'px';
+        canvas.style.height = displayH + 'px';
+
+        resolve();
+      };
+    });
+  } catch (err) {
+    loadStatus.textContent = '❌ Kamera açılamadı: ' + err.message;
+    throw err;
+  }
+}
+
+// ============================================================
+// MODEL YÜKLEME
+// ============================================================
+async function loadModel() {
+  loadStatus.textContent = 'AI modeli yükleniyor (~6MB)...';
+  progressFill.style.width = '50%';
+
+  // COCO-SSD: 80 farklı nesne sınıfını tanıyabilen hazır model
+  // mobilenet_v2: mobil cihazlar için optimize edilmiş, hızlı versiyon
+  model = await cocoSsd.load({ base: 'mobilenet_v2' });
+
+  progressFill.style.width = '90%';
+  loadStatus.textContent = 'Hazırlanıyor...';
+}
+
+// ============================================================
+// TAKİP ALGORİTMASI
+// ============================================================
+// Her yeni tespit listesinde çağrılır.
+// Hangi nesnenin takip edileceğine karar verir.
+function updateTracking(newDetections) {
+  // Yeterli güvene sahip tespitleri filtrele
+  const valid = newDetections.filter(d => d.score >= CONFIDENCE_THRESHOLD);
+
+  if (valid.length === 0) {
+    // Hiç tespit yok — kayıp sayacını artır
+    lostFrames++;
+    if (lostFrames > MAX_LOST_FRAMES) {
+      // Nesne çok uzun süredir görünmüyor, takibi bırak
+      trackedBox   = null;
+      trackedClass = null;
+      if (!lockedClass) lockInd.classList.remove('active');
+    }
+    return;
+  }
+
+  lostFrames = 0;
+  let bestMatch = null;
+  let bestScore = -1;
+
+  valid.forEach(det => {
+    let score = det.score;
+
+    if (trackedBox) {
+      // Önceki konumla örtüşme skoru — aynı nesneyi takip etmeye devam et
+      const iou = calcIoU(trackedBox, det.bbox);
+      // %40 güven + %60 konum sürekliliği
+      score = det.score * 0.4 + iou * 0.6;
+    }
+
+    // Kullanıcı bir sınıfı kilitledi ise, farklı sınıfları cezalandır
+    if (lockedClass && det.class !== lockedClass) {
+      score *= 0.2;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = det;
+    }
+  });
+
+  if (bestMatch) {
+    // Smooth geçiş uygula — ani sıçramaları önler
+    trackedBox   = trackedBox
+      ? smoothBox(trackedBox, bestMatch.bbox)
+      : bestMatch.bbox;
+    trackedClass = bestMatch.class;
+  }
+}
+
+// ============================================================
+// CANVAS ÇİZİM FONKSİYONU
+// ============================================================
+// Her animation frame'inde çalışır ve ekrana bounding box'ları çizer.
+function drawFrame(timestamp) {
+  // Canvas'ı temizle
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // FPS hesapla
+  frameCount++;
+  const now = Date.now();
+  if (now - lastFpsTime >= 1000) {
+    const fps = Math.round(frameCount * 1000 / (now - lastFpsTime));
+    fpsDisplay.textContent = fps + ' FPS';
+    fpsDisplay.className = fps < 15 ? 'low' : '';
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+
+  // ── Tüm Tespitleri Çiz (soluk, arka plan) ──────────────
+  detections.forEach(det => {
+    if (det.score < CONFIDENCE_THRESHOLD) return;
+    if (det === trackedClass) return; // Takip edilen ayrıca çizilecek
+
+    const [x, y, w, h] = det.bbox;
+
+    // Soluk beyaz kutu — tespit edilen ama takip edilmeyenler
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
+
+    // Küçük etiket
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${det.class} ${Math.round(det.score*100)}%`, x+4, y-4);
+  });
+
+  // ── Takip Edilen Nesneyi Çiz ────────────────────────────
+  if (trackedBox && trackedClass) {
+    const [x, y, w, h] = trackedBox;
+    const color = lockedClass ? '#ff4444' : '#00ff41'; // Kilit = kırmızı
+    const cx = x + w/2; // Kutunun merkezi X
+    const cy = y + h/2; // Kutunun merkezi Y
+    const cs = 18;      // Köşe çizgisi uzunluğu
+
+    // -- Dış parlama efekti (glow) --
+    // SVG filter yerine üst üste şeffaf kutular kullanıyoruz
+    ctx.strokeStyle = color + '20'; // Çok şeffaf
+    ctx.lineWidth   = 8;
+    ctx.strokeRect(x-4, y-4, w+8, h+8);
+
+    ctx.strokeStyle = color + '40';
+    ctx.lineWidth   = 4;
+    ctx.strokeRect(x-2, y-2, w+4, h+4);
+
+    // -- Ana noktalı kutu --
+    ctx.strokeStyle = color + 'bb';
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([8, 5]);
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
+
+    // -- Köşe L-çizgileri (askeri HUD tarzı) --
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 2.5;
+    ctx.lineCap     = 'round';
+
+    // Sol üst köşe
+    ctx.beginPath(); ctx.moveTo(x, y+cs); ctx.lineTo(x, y); ctx.lineTo(x+cs, y); ctx.stroke();
+    // Sağ üst köşe
+    ctx.beginPath(); ctx.moveTo(x+w-cs, y); ctx.lineTo(x+w, y); ctx.lineTo(x+w, y+cs); ctx.stroke();
+    // Sol alt köşe
+    ctx.beginPath(); ctx.moveTo(x, y+h-cs); ctx.lineTo(x, y+h); ctx.lineTo(x+cs, y+h); ctx.stroke();
+    // Sağ alt köşe
+    ctx.beginPath(); ctx.moveTo(x+w-cs, y+h); ctx.lineTo(x+w, y+h); ctx.lineTo(x+w, y+h-cs); ctx.stroke();
+
+    // -- Merkez çarpı (+) işareti --
+    ctx.strokeStyle = color + 'cc';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx-12, cy); ctx.lineTo(cx+12, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy-12); ctx.lineTo(cx, cy+12); ctx.stroke();
+    // Merkez nokta
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI*2); ctx.fill();
+
+    // -- Etiket (sınıf adı + güven skoru) --
+    const label = `${lockedClass ? '🔴' : '◉'} ${trackedClass.toUpperCase()}`;
+    const score = detections.find(d => d.class === trackedClass);
+    const scoreText = score ? ` ${Math.round(score.score*100)}%` : '';
+    const fullLabel = label + scoreText;
+
+    ctx.font = 'bold 13px monospace';
+    const tw = ctx.measureText(fullLabel).width;
+
+    // Etiket arka planı
+    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    ctx.fillRect(x, y-26, tw+16, 22);
+
+    // Etiket kenarlığı
+    ctx.strokeStyle = color + '80';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(x, y-26, tw+16, 22);
+
+    // Etiket metni
+    ctx.fillStyle = color;
+    ctx.fillText(fullLabel, x+8, y-10);
+
+    // -- Tarama çizgisi animasyonu --
+    // Kutunun içinde yukarıdan aşağıya kayan ince çizgi
+    const scanY = y + ((timestamp * 0.05) % h); // Periyodik hareket
+    const grad = ctx.createLinearGradient(x, scanY-10, x, scanY+10);
+    grad.addColorStop(0,   'transparent');
+    grad.addColorStop(0.5, color + '50');
+    grad.addColorStop(1,   'transparent');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x+2, scanY-10, w-4, 20);
+  }
+
+  // Bir sonraki frame'i iste — bu döngü kameranın FPS'iyle eşzamanlı çalışır
+  requestAnimationFrame(drawFrame);
+}
+
+// ============================================================
+// DOKUNMA / TIKLAMA İLE NESNE SEÇİMİ
+// ============================================================
+canvas.addEventListener('click', (e) => {
+  // Kullanıcı zaten kilitlemişse kilidi kaldır
+  if (lockedClass) {
+    lockedClass = null;
+    lockInd.classList.remove('active');
+    hint.textContent = '📍 Takip etmek için bir nesneye tıklayın';
+    hint.style.opacity = '1';
+    setTimeout(() => hint.style.opacity = '0', 2000);
+    return;
+  }
+
+  // Canvas'taki tıklama koordinatlarını gerçek video koordinatlarına çevir
+  const rect   = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const clickX = (e.clientX - rect.left)  * scaleX;
+  const clickY = (e.clientY - rect.top)   * scaleY;
+
+  // Tıklanan noktaya en yakın nesneyi bul
+  let closest = null;
+  let minDist = Infinity;
+
+  detections.forEach(det => {
+    if (det.score < CONFIDENCE_THRESHOLD) return;
+    const [bx, by, bw, bh] = det.bbox;
+    const bcx = bx + bw/2;
+    const bcy = by + bh/2;
+
+    // Tıklama kutunun içinde mi?
+    const inside = clickX>=bx && clickX<=bx+bw && clickY>=by && clickY<=by+bh;
+    const dist   = Math.hypot(clickX-bcx, clickY-bcy);
+
+    if (inside || dist < minDist) {
+      minDist  = dist;
+      closest  = det;
+    }
+  });
+
+  if (closest) {
+    // Seçilen nesneyi kilitle
+    lockedClass  = closest.class;
+    trackedBox   = closest.bbox;
+    trackedClass = closest.class;
+    lostFrames   = 0;
+    lockInd.classList.add('active');
+    hint.textContent = `🔴 ${closest.class.toUpperCase()} kilitlendi — kaldırmak için tekrar tıklayın`;
+    hint.style.opacity = '1';
+    setTimeout(() => hint.style.opacity = '0', 3000);
+  }
+});
+
+// ============================================================
+// ANA DÖNGÜ: PERİYODİK NESNE TESPİTİ
+// ============================================================
+async function detectionLoop() {
+  while (true) {
+    if (model && video.readyState === 4) {
+      // Modeli çalıştır — video frame'ini analiz et
+      const results = await model.detect(video);
+      detections = results;
+
+      // Takip algoritmasını güncelle
+      updateTracking(results);
+
+      // Üst çubuk istatistiklerini güncelle
+      const validCount = results.filter(d => d.score >= CONFIDENCE_THRESHOLD).length;
+      detCount.textContent = validCount + ' nesne';
+
+      // Alt çubukta tespit edilen sınıfları göster
+      const classes = [...new Set(results
+        .filter(d => d.score >= CONFIDENCE_THRESHOLD)
+        .map(d => d.class))];
+
+      detList.innerHTML = classes
+        .map(c => `<span class="detected-tag">${c}</span>`)
+        .join('');
+    }
+
+    // Belirlenen interval kadar bekle
+    await new Promise(r => setTimeout(r, DETECTION_INTERVAL_MS));
+  }
+}
+
+// ============================================================
+// BAŞLATMA
+// ============================================================
+async function init() {
+  try {
+    // 1. Kamerayı aç
+    await startCamera();
+    progressFill.style.width = '40%';
+    loadStatus.textContent = 'Kamera açıldı ✓';
+
+    // 2. Modeli yükle
+    await loadModel();
+    progressFill.style.width = '100%';
+
+    // 3. Yükleme ekranını kapat
+    await new Promise(r => setTimeout(r, 400));
+    loading.style.opacity = '0';
+    loading.style.transition = 'opacity 0.5s';
+    setTimeout(() => loading.style.display = 'none', 500);
+
+    modelStatus.textContent = '✅ Model hazır';
+
+    // 4. Çizim döngüsünü başlat (requestAnimationFrame ile ~60 FPS)
+    requestAnimationFrame(drawFrame);
+
+    // 5. Tespit döngüsünü başlat (DETECTION_INTERVAL_MS aralıklarla)
+    detectionLoop();
+
+    // İpucunu 4 saniye sonra gizle
+    setTimeout(() => hint.style.opacity = '0', 4000);
+
+  } catch (err) {
+    loadStatus.textContent = '❌ Hata: ' + err.message;
+    progressFill.style.background = '#ff4444';
+  }
+}
+
+// Sayfa yüklenince başlat
+init();
+</script>
+</body>
+</html>
